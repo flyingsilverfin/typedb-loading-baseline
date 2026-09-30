@@ -281,7 +281,7 @@ def main():
         stop_server(server)
 
     results = {
-        "typedb": server_version,
+        "typedb": {**server_version, "home": str(server_bin.parent.parent)},
         "machine": machine_info(),
         "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds, "entities": args.entities, "relations": args.relations,
                        "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
