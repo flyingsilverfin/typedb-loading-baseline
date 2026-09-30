@@ -223,8 +223,9 @@ def main():
     parser.add_argument("--relations", type=int, default=1_000_000, help="rows in the relation table (default: 1000000)")
     parser.add_argument("--batch-rows", type=int, default=1000, help="loader rows per transaction (default: 1000)")
     parser.add_argument("--parallel-batches", type=int, default=8, help="loader concurrent transactions (default: 8)")
-    parser.add_argument("--settle-seconds", type=float, default=3,
-                        help="untimed pause between load steps; 0 to disable (default: 3, see README)")
+    parser.add_argument("--settle-seconds", type=float, default=30,
+                        help="untimed pause between the entity loads and the relation load, so the server's "
+                             "statistics catch up; 0 to disable (default: 30, see README)")
     parser.add_argument("--version", default=DEFAULT_VERSION, help=f"TypeDB version to download (default: {DEFAULT_VERSION})")
     parser.add_argument("--typedb-home", type=Path, help="use this TypeDB distribution instead of downloading one")
     parser.add_argument("--database", default="loading-baseline", help="database name (default: loading-baseline)")
@@ -261,11 +262,11 @@ def main():
         for kind, name, template in (("entity", "first-entity", "load-first.tql"),
                                      ("entity", "second-entity", "load-second.tql"),
                                      ("relation", "between", "load-between.tql")):
-            if phases and args.settle_seconds:
+            if kind == "relation" and args.settle_seconds:
                 # Starting the relation load immediately after the entity loads can leave the
-                # server planning it from stale statistics: on a small fresh database about half
-                # of such runs stall for ~20s with the server CPU-bound. See README.
-                print(f"\nSettling for {args.settle_seconds}s (not timed)")
+                # server planning it from statistics that don't include the entities yet, which
+                # stalls the first batches with a full scan per row. See README.
+                print(f"\nWaiting {args.settle_seconds}s for statistics to catch up (not timed)")
                 time.sleep(args.settle_seconds)
             print(f"\nLoading {kind} {name} ({data_files[name].relative_to(ROOT)} with {template})")
             seconds, summary = run_loader(loader_command, ROOT / template, data_files[name], results_dir / name, args)

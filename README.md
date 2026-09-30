@@ -49,8 +49,8 @@ scratch.
 4. **Define** `schema.tql` in a new database.
 5. **Load**, timing each step: `load-first.tql`, then `load-second.tql`, then
    `load-between.tql`. The relation template matches both endpoints by their `@key` id
-   before inserting. The steps are separated by an untimed pause (`--settle-seconds`);
-   see the lessons below for why.
+   before inserting. Before the relation load there is an untimed 30s pause
+   (`--settle-seconds`) so the server's statistics catch up; see the lessons below.
 6. **Validate** the instance counts and spot-check that specific CSV rows were loaded with
    the right values and role players. Then stop the server.
 
@@ -68,7 +68,7 @@ python3 run_benchmark.py --help
   --relations N            rows in the relation table (default: 1000000)
   --batch-rows N           rows per transaction (default: 1000)
   --parallel-batches N     concurrent transactions (default: 8)
-  --settle-seconds S       untimed pause between load steps (default: 3)
+  --settle-seconds S       untimed pause before the relation load (default: 30)
   --version V              TypeDB version to download (default: 3.13.6)
   --typedb-home DIR        use this TypeDB distribution instead of downloading one
   --database NAME          database name (default: loading-baseline)
@@ -134,10 +134,15 @@ inputs are not supported, and progress is reported in rows only, not bytes.
 - **Starting the relation load right after the entity loads can stall.** On a fresh
   20k-entity database, about half of such runs stalled for 20–30s, versus 0.7s normally.
   During the stall the server burned about 150s of CPU on 8 cores. The first in-flight
-  batches were slow and everything after them was fast. The likely cause is that those
-  batches were planned from statistics that didn't yet include the new entities. A 3s pause
-  between load steps removed the stall in 10 of 10 runs, so the benchmark pauses by default.
-  Use `--settle-seconds 0` to reproduce it. This deserves a TypeDB issue: real loading
+  batches were slow and everything after them was fast. The query profile
+  (`RUST_LOG=info,query::query_manager=trace,database::query=trace`) confirmed the cause:
+  those batches were planned from statistics that didn't yet include the second entity
+  load. The planner then scanned every `second-entity` `has` edge for each input row (60M
+  storage advances per 1,000-row batch) instead of looking up `id` by value. A 3s pause
+  prevented it at small scale, but at 1M rows it still hit 4 of 8 runs with 10k-row
+  batches. Stalled batches can run into the 300s
+  transaction timeout and be rejected. The benchmark therefore waits 30s before the
+  relation load. Use `--settle-seconds 0` to reproduce it. This deserves a TypeDB issue: real loading
   pipelines usually load relations straight after entities.
 - **Rows that match nothing are dropped silently.** If a relation row's `from` or `to` id
   isn't found, its `match` returns no rows and nothing is inserted. The loader only warns
