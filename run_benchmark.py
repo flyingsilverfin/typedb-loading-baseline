@@ -7,6 +7,7 @@ Steps (everything is written under run/):
   3. start a fresh TypeDB server, in development mode, on an empty data directory
   4. create the database and define schema.tql
   5. load first-entity, second-entity, then between, timing each with typedb loader
+     (or, with --loader python, with python_loader.py and the TypeDB Python driver)
   6. validate instance counts and spot-check loaded rows, then stop the server
 """
 
@@ -121,10 +122,24 @@ def generate(table, path, *generate_args):
     partial.rename(path)
 
 
-def run_loader(loader_bin, query, data, output_dir, args):
+def ensure_python_loader():
+    """Set up run/venv with the Python driver; return the command prefix running python_loader.py."""
+    venv = RUN_DIR / "venv"
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    requirements = (ROOT / "requirements.txt").read_text()
+    installed = venv / "requirements.txt"
+    if not (installed.exists() and installed.read_text() == requirements):
+        print(f"Installing the TypeDB Python driver into {venv.relative_to(ROOT)}")
+        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+        subprocess.run([str(python), "-m", "pip", "install", "-q", "-r", str(ROOT / "requirements.txt")], check=True)
+        installed.write_text(requirements)
+    return [str(python), str(ROOT / "python_loader.py")]
+
+
+def run_loader(loader_command, query, data, output_dir, args):
     output_dir.mkdir(parents=True)
     command = [
-        str(loader_bin),
+        *loader_command,
         f"--query={query}", f"--data={data}", "--header",
         f"--database={args.database}",
         f"--address=127.0.0.1:{args.port}", f"--username={USERNAME}", f"--password={PASSWORD}", "--tls-disabled",
@@ -202,10 +217,14 @@ def machine_info():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--loader", choices=("typedb", "python"), default="typedb",
+                        help="typedb: the typedb loader binary; python: python_loader.py (default: typedb)")
     parser.add_argument("--entities", type=int, default=1_000_000, help="rows per entity table (default: 1000000)")
     parser.add_argument("--relations", type=int, default=1_000_000, help="rows in the relation table (default: 1000000)")
     parser.add_argument("--batch-rows", type=int, default=1000, help="loader rows per transaction (default: 1000)")
     parser.add_argument("--parallel-batches", type=int, default=8, help="loader concurrent transactions (default: 8)")
+    parser.add_argument("--settle-seconds", type=float, default=3,
+                        help="untimed pause between load steps; 0 to disable (default: 3, see README)")
     parser.add_argument("--version", default=DEFAULT_VERSION, help=f"TypeDB version to download (default: {DEFAULT_VERSION})")
     parser.add_argument("--typedb-home", type=Path, help="use this TypeDB distribution instead of downloading one")
     parser.add_argument("--database", default="loading-baseline", help="database name (default: loading-baseline)")
@@ -214,6 +233,7 @@ def main():
     args = parser.parse_args()
 
     server_bin, loader_bin = ensure_typedb(args.version, args.typedb_home)
+    loader_command = ensure_python_loader() if args.loader == "python" else [str(loader_bin)]
 
     n = args.entities
     data_dir = RUN_DIR / "data"
@@ -238,11 +258,19 @@ def main():
         http.query(args.database, "schema", (ROOT / "schema.tql").read_text())
 
         phases = []
-        for name, template in (("first-entity", "load-first.tql"), ("second-entity", "load-second.tql"), ("between", "load-between.tql")):
-            print(f"\nLoading {name} ({data_files[name].relative_to(ROOT)} with {template})")
-            seconds, summary = run_loader(loader_bin, ROOT / template, data_files[name], results_dir / name, args)
+        for kind, name, template in (("entity", "first-entity", "load-first.tql"),
+                                     ("entity", "second-entity", "load-second.tql"),
+                                     ("relation", "between", "load-between.tql")):
+            if phases and args.settle_seconds:
+                # Starting the relation load immediately after the entity loads can leave the
+                # server planning it from stale statistics: on a small fresh database about half
+                # of such runs stall for ~20s with the server CPU-bound. See README.
+                print(f"\nSettling for {args.settle_seconds}s (not timed)")
+                time.sleep(args.settle_seconds)
+            print(f"\nLoading {kind} {name} ({data_files[name].relative_to(ROOT)} with {template})")
+            seconds, summary = run_loader(loader_command, ROOT / template, data_files[name], results_dir / name, args)
             rows = summary.get("Rows committed", 0)
-            phases.append({"phase": name, "rows": rows, "rejected": summary.get("Rows rejected"),
+            phases.append({"phase": f"{kind} {name}", "rows": rows, "rejected": summary.get("Rows rejected"),
                            "seconds": round(seconds, 3), "rows_per_second": round(rows / seconds)})
             if summary.get("Rows rejected") != 0:
                 sys.exit(f"typedb loader rejected rows; see {results_dir / name}")
@@ -255,7 +283,7 @@ def main():
     results = {
         "typedb": server_version,
         "machine": machine_info(),
-        "parameters": {"entities": args.entities, "relations": args.relations,
+        "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds, "entities": args.entities, "relations": args.relations,
                        "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
         "phases": phases,
         "valid": valid,
@@ -263,10 +291,10 @@ def main():
     (results_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 
     print(f"\nTypeDB {server_version.get('version', '?')} on {results['machine']['machine']}, "
-          f"{results['machine']['cpus']} CPUs; batch-rows={args.batch_rows}, parallel-batches={args.parallel_batches}")
-    print(f"{'phase':<16}{'rows':>12}{'seconds':>10}{'rows/s':>10}")
+          f"{results['machine']['cpus']} CPUs; loader={args.loader}, batch-rows={args.batch_rows}, parallel-batches={args.parallel_batches}")
+    print(f"{'phase':<24}{'rows':>12}{'seconds':>10}{'rows/s':>10}")
     for p in phases:
-        print(f"{p['phase']:<16}{p['rows']:>12,}{p['seconds']:>10.1f}{p['rows_per_second']:>10,}")
+        print(f"{p['phase']:<24}{p['rows']:>12,}{p['seconds']:>10.1f}{p['rows_per_second']:>10,}")
     print(f"\nResults: {results_dir.relative_to(ROOT) / 'results.json'}")
     if not valid:
         sys.exit("validation FAILED")
