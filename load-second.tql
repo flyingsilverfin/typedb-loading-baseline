@@ -1,0 +1,3 @@
+given $id: integer, $A: integer, $B: integer;
+insert
+  $e isa second-entity, has id == $id, has A == $A, has B == $B;

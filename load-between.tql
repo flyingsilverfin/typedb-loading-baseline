@@ -1,0 +1,6 @@
+given $from: integer, $to: integer;
+match
+  $f isa first-entity, has id == $from;
+  $t isa second-entity, has id == $to;
+insert
+  $r isa between, links (source: $f, target: $t);

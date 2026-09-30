@@ -1,0 +1,21 @@
+# `first` and `from` are reserved TypeQL keywords, hence first-entity and source/target.
+define
+  attribute id, value integer;
+  attribute A, value integer;
+  attribute B, value integer;
+
+  entity first-entity,
+    owns id @key,
+    owns A,
+    owns B,
+    plays between:source;
+
+  entity second-entity,
+    owns id @key,
+    owns A,
+    owns B,
+    plays between:target;
+
+  relation between,
+    relates source,
+    relates target;
