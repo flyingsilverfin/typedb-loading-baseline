@@ -69,18 +69,25 @@ class TypeDBHttp:
         return answers[0]["data"]["count"]["value"]
 
 
-def ensure_port_free(port):
-    with socket.socket() as s:
-        if s.connect_ex(("127.0.0.1", port)) == 0:
+def ensure_port_free(port, wait_seconds=10):
+    deadline = time.monotonic() + wait_seconds  # a just-stopped server may take a moment to release it
+    while True:
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return
+        if time.monotonic() > deadline:
             sys.exit(f"port {port} is already in use (another TypeDB server?); stop it or pass --port / --http-port")
+        time.sleep(0.2)
 
 
-def start_server(server_bin, server_dir, args):
+def start_server(server_bin, server_dir, args, fresh=True):
+    """Start the server; fresh=False restarts it on the existing data directory."""
     ensure_port_free(args.port)
     ensure_port_free(args.http_port)
-    shutil.rmtree(server_dir, ignore_errors=True)
-    server_dir.mkdir(parents=True)
-    log = open(server_dir / "server.log", "w")
+    if fresh:
+        shutil.rmtree(server_dir, ignore_errors=True)
+        server_dir.mkdir(parents=True)
+    log = open(server_dir / "server.log", "w" if fresh else "a")
     process = subprocess.Popen(
         [
             str(server_bin),
@@ -226,6 +233,8 @@ def main():
     parser.add_argument("--settle-seconds", type=float, default=30,
                         help="untimed pause between the entity loads and the relation load, so the server's "
                              "statistics catch up; 0 to disable (default: 30, see README)")
+    parser.add_argument("--restart-after-schema", action="store_true",
+                        help="restart the server after defining the schema (workaround for TypeDB PR #7981)")
     parser.add_argument("--version", default=DEFAULT_VERSION, help=f"TypeDB version to download (default: {DEFAULT_VERSION})")
     parser.add_argument("--typedb-home", type=Path, help="use this TypeDB distribution instead of downloading one")
     parser.add_argument("--database", default="loading-baseline", help="database name (default: loading-baseline)")
@@ -257,6 +266,13 @@ def main():
         http.sign_in()
         http.request("POST", f"/v1/databases/{args.database}")
         http.query(args.database, "schema", (ROOT / "schema.tql").read_text())
+        if args.restart_after_schema:
+            # Works around TypeDB PR #7981 (commit deltas): after a schema commit, its statistics
+            # updater stops applying data commits until the server restarts.
+            print("Restarting the server after the schema commit (--restart-after-schema)")
+            stop_server(server)
+            server, http = start_server(server_bin, RUN_DIR / "server", args, fresh=False)
+            http.sign_in()
 
         phases = []
         for kind, name, template in (("entity", "first-entity", "load-first.tql"),
@@ -284,7 +300,8 @@ def main():
     results = {
         "typedb": {**server_version, "home": str(server_bin.parent.parent)},
         "machine": machine_info(),
-        "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds, "entities": args.entities, "relations": args.relations,
+        "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds,
+                       "restart_after_schema": args.restart_after_schema, "entities": args.entities, "relations": args.relations,
                        "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
         "phases": phases,
         "valid": valid,
