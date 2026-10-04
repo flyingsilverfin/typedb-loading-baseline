@@ -2,7 +2,7 @@
 
 A reproducible benchmark of bulk-loading speed into TypeDB, in a deliberately basic
 scenario: two entity types, each with an integer key and two integer attributes, joined by
-a binary relation. Loading runs either with [TypeDB loader](https://github.com/typedb/typedb-console/tree/master/loader)
+a binary relation. Loading runs either with [TypeDB loader](https://typedb.com/docs/tools/loader/)
 or with `python_loader.py`, an equivalent built on the TypeDB Python driver.
 
 ```bash
@@ -16,48 +16,98 @@ everything and prints a summary like:
 ```
 TypeDB 3.13.6 on aarch64, 10 CPUs; loader=typedb, batch-rows=1000, parallel-batches=8
 phase                           rows   seconds    rows/s
-entity first-entity        1,000,000      20.7    48,261
-entity second-entity       1,000,000      23.2    43,011
-relation between           1,000,000      35.8    27,940
+entity first-entity        1,000,000      23.9    41,903
+entity second-entity       1,000,000      29.6    33,832
+relation between           1,000,000      35.2    28,437
+
+Results: run/results/20260930-201720/results.json
 ```
 
 Each row is one load step: the 1M `first-entity` entities, then the 1M `second-entity`
 entities, then 1M `between` relations, each linking a `first-entity` to a `second-entity`.
 
-Requirements: Python 3.8+, Linux or macOS on x86_64 or arm64, and internet access for the
-first run. The benchmark itself uses only the standard library. `--loader python` installs
-the TypeDB Python driver into a virtualenv, `run/venv`. Everything that is downloaded,
-generated or written goes into `run/`, which is git-ignored. Delete it to start from
-scratch.
+## Quick start
 
-## What it does
+**Requirements.** Python 3.8 or newer (`--loader python` needs 3.9 to 3.14, the versions
+the pinned driver ships wheels for), and internet access for the first run. The benchmark
+itself uses only the standard library; `--loader python` installs the TypeDB Python driver
+into a virtualenv, `run/venv`. Only tested on Linux arm64. The macOS download path is
+implemented but untested, and Windows is untested.
 
-1. **Download** `typedb-all` for this platform (server + loader) into `run/`, unless it is
-   already there (`download_typedb.py`). With `--typedb-home <dir>`, it uses an existing
-   TypeDB distribution instead. If that distribution has no loader, it downloads the
-   standalone `typedb-loader` package.
-2. **Generate** the CSVs into `run/data/`, unless they already exist (`generate.py`):
-   - `first-entity`, `second-entity`: `id,A,B`, where `id` counts up from 0 and A, B are
-     random integers in `[0, 2^31)`.
-   - `between`: `from,to`, each column a random sample (with replacement) of the dense
-     IDs `[0, entities)`.
-   All columns come from seeded `random.Random` streams, so the data is byte-identical
-   everywhere.
-3. **Start** a TypeDB server in development mode on an empty data directory,
-   `run/server/`. Each run starts from a fresh database. Development mode only turns off
-   diagnostics reporting to TypeDB, so benchmark runs don't send telemetry.
-4. **Define** `schema.tql` in a new database.
-5. **Load**, timing each step: `load-first.tql`, then `load-second.tql`, then
-   `load-between.tql`. The relation template matches both endpoints by their `@key` id
-   before inserting.
-6. **Validate**, only with `--validate`: check the instance counts and spot-check that
-   specific CSV rows were loaded with the right values and role players. This is untimed,
-   and off by default because counting a large database takes a while. Then stop the
-   server.
+**What to expect.** The first run downloads about 30 MB (100 MB unpacked) into `run/`. The
+default parameters write about 70 MB of CSV and take about two minutes on the reference
+machine, 90 s of it loading. Everything that is downloaded, generated or written goes into
+`run/`, which is git-ignored; delete it to start from scratch. Start with a smoke run,
+which takes about 15 s:
 
-Results, the loaders' logs and their rejects/checkpoint files go to
-`run/results/<timestamp>/`. `results.json` records the TypeDB version, machine,
-parameters and per-step timings. It is the file to share when reporting numbers.
+```bash
+python3 run_benchmark.py --entities 20000 --relations 30000
+```
+
+**Troubleshooting.**
+
+- *port 1729 (or 8000) is already in use*: another TypeDB server, or something else on
+  port 8000, is running. Stop it, or pass `--port` / `--http-port`.
+- *TypeDB server failed to start*: the message ends with the tail of
+  `run/server/server.log`; the server's own log files are in `run/server/logs/`.
+- *rejected rows*: the run stops after the step that rejected them. Its
+  `run/results/<timestamp>/<step>/` holds the loader's output (`loader.log`) and the
+  rejected rows with their errors (`rejects.csv`, `rejects.log`).
+- *a much slower relation step* (minutes instead of seconds): a known planner issue, see
+  Lessons below. Run the benchmark again.
+
+## TypeDB terms used here
+
+An *entity* is a thing (`first-entity`). An *attribute* is a typed value an entity owns
+(`id`, `A`, `B`). `@key` makes `id` unique and required, so an entity can be looked up by
+it. A *relation* (`between`) links entities, each playing a *role* (`source`, `target`).
+These are declared in `schema.tql` with a
+[`define`](https://typedb.com/docs/typeql-reference/schema/define/) query.
+
+The load templates (`load-*.tql`) are queries that start with a `given` stage, such as
+`given $id: integer, $A: integer, $B: integer;`, which declares the query's input
+variables. The loader runs the query once per CSV row, sending the rows of a batch as the
+query's input ("given rows") and committing each batch as one transaction. The rest of the
+template is an ordinary [`insert`](https://typedb.com/docs/typeql-reference/data-pipelines/insert/),
+optionally preceded by a `match`.
+
+`typedb loader` is a CLI for loading CSV files through such templates
+([reference](https://typedb.com/docs/tools/loader/reference/)). It ships in the
+`typedb-all` distribution next to the server. The server runs in *development mode*,
+which only turns off diagnostics reporting to TypeDB; it does not change performance.
+
+## Reading the results
+
+Each phase's *seconds* is the wall-clock time of one loader process, including its startup
+and connection (well under a second). Server start, schema definition, data generation
+and `--validate` are not timed. An entity row inserts one entity with three attributes. A
+relation row looks up two entities by key and inserts one relation with two role players.
+
+Runs vary by about 15–20%. Run the benchmark three times and report the median, and share
+each run's `results.json`, which records the TypeDB version, the machine, the parameters
+and the per-step timings:
+
+```json
+{
+  "typedb": {"distribution": "TypeDB CE", "version": "3.13.6", "home": "/.../run/typedb-all-linux-arm64-3.13.6"},
+  "machine": {"platform": "Linux-6.12.76-linuxkit-aarch64-with-glibc2.39", "machine": "aarch64", "cpus": 10, "memory_gb": 31.5},
+  "parameters": {"loader": "typedb", "server_args": [], "entities": 1000000, "relations": 1000000, "batch_rows": 1000, "parallel_batches": 8},
+  "phases": [
+    {"phase": "entity first-entity", "rows": 1000000, "rejected": 0, "seconds": 23.864, "rows_per_second": 41903},
+    ...
+  ],
+  "valid": true,
+  "error": null
+}
+```
+
+`valid: null` means the run did not use `--validate`. `typedb.home` is a path on your
+machine; strip it if you don't want to share it. When a step fails, the file still records
+the completed phases, with the message in `error`.
+
+Use `--validate` for numbers you publish. It checks the instance counts and spot-checks
+loaded rows after the loads, untimed. This matters because a relation row whose ids match
+nothing inserts nothing, without an error.
 
 ## Architecture
 
@@ -77,9 +127,9 @@ Rates below are from a 10-CPU arm64 machine running TypeDB 3.13.6, unless stated
   and server competed for cores; entity loading still improved slightly up to 16.
 - **Keep batches moderate.** Larger batches mean fewer commits, but each slow or failed
   batch costs more. With 10,000-row batches, 4 of 8 runs had relation loads stall for
-  minutes when batches were planned badly (see Lessons), some hitting the 300s
-  transaction timeout, and the runs that didn't stall were no faster. 1,000 rows was a
-  good balance.
+  minutes when batches were planned badly (see [NOTES.md](NOTES.md)), some hitting the
+  300s transaction timeout, and the runs that didn't stall were no faster. 1,000 rows was
+  a good balance.
 - **Load entities first, then relations.** A relation needs its role players to exist,
   so the relation template matches both endpoints before inserting. Loading all entities
   first means every relation batch can find its endpoints.
@@ -98,24 +148,25 @@ Rates below are from a 10-CPU arm64 machine running TypeDB 3.13.6, unless stated
   defined before timing starts. Validation is optional (`--validate`) and runs after all
   loads, untimed. Only the loader runs themselves are timed.
 
-## Options
+## Changing the data
 
-```
-python3 run_benchmark.py --help
+Three things must agree: the CSV header (`id,A,B`), the `given` variables (`$id, $A, $B`,
+matched to columns **by name**, because the benchmark passes `--header`), and the
+attribute labels in `schema.tql`. The attribute labels are free: `has A == $A` reads like
+that by convention only, and only the variable must match the column. The spot checks in
+`validate()` take the attribute names from the CSV header, so they expect a column and an
+attribute with the same name, and unquoted (numeric) values.
 
-  --loader typedb|python   typedb loader binary, or python_loader.py (default: typedb)
-  --entities N             rows per entity table (default: 1000000)
-  --relations N            rows in the relation table (default: 1000000)
-  --batch-rows N           rows per transaction (default: 1000)
-  --parallel-batches N     concurrent transactions (default: 8)
-  --validate               check counts and spot-check rows after loading (default: off)
-  --version V              TypeDB version to download (default: 3.13.6)
-  --typedb-home DIR        use this TypeDB distribution instead of downloading one
-  --database NAME          database name (default: loading-baseline)
-  --port / --http-port     server ports (default: 1729 / 8000)
-```
+`generate.py entities` supports any number of value columns (`-c`: A, B, C, ...) and the
+value types `integer`, `double`, `string` and `boolean`; `run_benchmark.py` calls it with
+two integer columns. To add a third integer column C: pass `columns=3` in both
+`generate("entities", ...)` calls in `run_benchmark.py`, add `attribute C, value integer;`
+and `owns C` to the schema, and add `$C: integer` and `has C == $C` to both entity
+templates. The data file names spell out every generator option
+(`run/data/first-entity-rows=1000000-columns=2-value_type=integer-seed=0.csv`), so a
+changed shape is generated afresh and never reuses a stale file.
 
-The individual pieces also work on their own:
+The pieces also work on their own:
 
 ```bash
 python3 download_typedb.py [--version V] [--typedb-home DIR]
@@ -123,15 +174,77 @@ python3 generate.py entities  -n 1000000 -c 2 -t integer -o first.csv
 python3 generate.py relations -n 1000000 --from-range 0:1000000 --to-range 0:1000000 -o between.csv
 ```
 
-`generate.py entities` supports any number of value columns (`-c`: A, B, C, ...) and the
-value types `integer`, `double`, `string` and `boolean`. The schema and templates in this
-repository cover the default: two integer columns. To benchmark other shapes, adjust
-`schema.tql` and the `load-*.tql` templates to match.
+## Options
 
-## Python loader
+```
+python3 run_benchmark.py --help
+
+options:
+  -h, --help            show this help message and exit
+  --loader {typedb,python}
+                        typedb: the typedb loader binary; python:
+                        python_loader.py (default: typedb)
+  --entities ENTITIES   rows per entity table (default: 1000000)
+  --relations RELATIONS
+                        rows in the relation table (default: 1000000)
+  --batch-rows BATCH_ROWS
+                        loader rows per transaction (default: 1000)
+  --parallel-batches PARALLEL_BATCHES
+                        loader concurrent transactions (default: 8)
+  --validate            after loading, check instance counts and spot-check
+                        loaded rows (not timed; off by default)
+  --version VERSION     TypeDB version to download (default: 3.13.6)
+  --database DATABASE   database name (default: loading-baseline)
+  --port PORT           server gRPC port (default: 1729)
+  --http-port HTTP_PORT
+                        server HTTP port (default: 8000)
+
+advanced:
+  --typedb-home TYPEDB_HOME
+                        use this TypeDB distribution instead of downloading
+                        one
+  --server-arg ARG      extra TypeDB server argument, e.g. --server-
+                        arg=--storage.rocksdb.cache-size=4gb; repeatable
+```
+
+The advanced options are for comparing TypeDB builds and server settings; the defaults
+are what the reported numbers use.
+
+## How it works
+
+1. **Download** `typedb-all` for this platform (server + loader) into `run/`, unless it is
+   already there (`download_typedb.py`). With `--typedb-home <dir>`, it uses an existing
+   TypeDB distribution instead. If that distribution has no loader, it downloads the
+   standalone `typedb-loader` package.
+2. **Generate** the CSVs into `run/data/`, unless they already exist (`generate.py`):
+   - `first-entity`, `second-entity`: `id,A,B`, where `id` counts up from 0 and A, B are
+     random integers in `[0, 2^31)`.
+   - `between`: `from,to`, each column a random sample (with replacement) of the dense
+     IDs `[0, entities)`.
+   All columns come from seeded `random.Random` streams, so the data is byte-identical
+   everywhere.
+3. **Start** a TypeDB server in development mode on an empty data directory,
+   `run/server/`. Each run starts from a fresh database.
+4. **Define** `schema.tql` in a new database, through the server's HTTP API.
+5. **Load**, timing each step: `load-first.tql`, then `load-second.tql`, then
+   `load-between.tql`. The relation template matches both endpoints by their `@key` id
+   before inserting.
+6. **Validate**, only with `--validate`: check the instance counts and spot-check that
+   specific CSV rows were loaded with the right values and role players. This is untimed,
+   and off by default because counting a large database takes a while. Then stop the
+   server.
+
+Results, the loaders' logs and their rejects/checkpoint files go to
+`run/results/<timestamp>/`. The server uses the configuration bundled with its
+distribution (`server/config.yml`), except for ports, data and log directories, and
+development mode.
+
+### Python loader
 
 `python_loader.py` loads a CSV through the TypeDB Python driver. It takes the same
-arguments as `typedb loader`, so the two are interchangeable in scripts:
+arguments as `typedb loader`, so the two are interchangeable in scripts. Against a running
+server (for example `run/typedb-all-*/server/typedb_server_bin`, or the one
+`run_benchmark.py` starts):
 
 ```bash
 pip install -r requirements.txt
@@ -156,72 +269,20 @@ inputs are not supported, and progress is reported in rows only, not bytes.
 
 ## Lessons
 
-### typedb loader
-
 - **Some names are reserved.** `first` and `from` are TypeQL keywords (as are `last`,
   `of` and the other statement keywords), so they can't be used as type or role labels.
   That is why the types are `first-entity` / `second-entity` and the roles are
   `source` / `target`. `$from` is still fine as a variable name.
-- **The loader is its own binary.** It is not console's `load` command. It ships in the
-  `typedb-all-<os>-<arch>` archive and as a standalone `typedb-loader-<os>-<arch>` package:
-  `.tar.gz` on Linux, `.zip` on macOS and Windows.
-- **Development mode is a hidden flag,** `--development-mode.enabled=true`. In the server
-  code, it only disables diagnostics and error reporting, so it doesn't affect load speed.
-- **Parallelism is the main throughput knob.** Going from `--parallel-batches` 1 to 4 to 8
-  gave about 11k → 37k → 52k rows/s for first-entity, and 6k → 20k → 32k rows/s for
-  relations. The default is fixed at 8 rather than tied to CPU count, so results stay
-  comparable across machines.
-- **Starting the relation load right after the entity loads can stall.** On a fresh
-  20k-entity database, about half of such runs stalled for 20–30s, versus 0.7s normally.
-  During the stall the server burned about 150s of CPU on 8 cores. The first in-flight
-  batches were slow and everything after them was fast. The query profile
-  (`RUST_LOG=info,query::query_manager=trace,database::query=trace`) confirmed the cause:
-  those batches were planned from statistics that didn't yet include the second entity
-  load. The planner then scanned every `second-entity` `has` edge for each input row (60M
-  storage advances per 1,000-row batch) instead of looking up `id` by value. A 3s pause
-  prevented it at small scale, but at 1M rows it still hit 4 of 8 runs with 10k-row
-  batches. Stalled batches can run into the 300s transaction timeout and be rejected.
-  The benchmark doesn't pause, so a run that hits this shows a much slower relation
-  step; if that happens, run it again.
+- **Parallelism is the main throughput knob.** The default of 8 parallel batches is fixed
+  rather than tied to CPU count, so results stay comparable across machines.
 - **Rows that match nothing are dropped silently.** If a relation row's `from` or `to` id
   isn't found, its `match` returns no rows and nothing is inserted. The loader only warns
-  when an entire batch inserts nothing, so check counts after a load, as
-  `--validate` does.
+  when an entire batch inserts nothing, so check counts after a load, as `--validate`
+  does.
+- **The relation step occasionally stalls.** Its first batches can be planned from
+  statistics that don't yet include the entity loads, which makes them scan instead of
+  look up by id. A run that hits this shows a much slower relation step; run it again.
 - **Expect run-to-run variance of about 15–20%.** Compare several runs, not single numbers.
-- The package repository (repo.typedb.com) returns 403 to Python's default `urllib`
-  User-Agent. `download_typedb.py` sends its own.
 
-### Python driver
-
-- **Given rows must be typed.** Over gRPC, the server rejects a string for an `integer`
-  variable (`[GVN7] ... has type 'string' and could not be decoded as the value type
-  'integer'`). The client therefore parses each cell into its declared type, as
-  `typedb loader` does.
-- **Both given-rows forms cost the same.** A list of dicts with plain Python values
-  (`[{"id": 1, "A": 2}]`, converted by the driver) and a `(variables, rows)` tuple of
-  `Concept`s (`TypeDB.Concept.new_integer(...)`) both take about 4–5ms per 1,000 rows of
-  3 integers. The loader uses the dict form, since it's the documented one.
-- **Build batches on one thread.** The driver's native layer releases the GIL around every
-  call, and building a batch makes a native call per cell. When each consumer thread built
-  its own batch, 8 threads fought over the GIL on every call. That load reached only
-  16–18k rows/s for entities and spent more CPU in the kernel than in Python (11.5s system
-  vs 5.5s user for 200k rows). Throughput also got worse past 4 threads. Building batches
-  on the producer thread, so consumers only open, query and commit, cut system CPU to
-  near zero and made 8 threads about 3.5× faster: 59k rows/s, up from 17k.
-- **After that fix, it matches typedb loader.** At 8 threads, across 1M-row runs on the
-  machine above, both loaders landed in the same range: 42–55k rows/s for the first entity
-  type, 34–51k for the second, and 27–37k for relations. The differences were within
-  run-to-run noise. Parsing and batch building on the producer takes about 5ms per 1,000
-  rows (about 200k rows/s), which is well above what the server absorbs here.
-- **This system Python has no pip.** The Python here has no `pip` module, but
-  `python3 -m venv` still bootstraps one, so the benchmark installs the pinned driver
-  (`requirements.txt`) into `run/venv`.
-
-## Notes
-
-- Timings are wall-clock per loader invocation, including loader startup and driver
-  connection (well under a second).
-- The server uses the configuration bundled with its distribution (`server/config.yml`),
-  except for ports, data and log directories, and development mode.
-- Only tested on Linux arm64. The macOS download path is implemented but untested, and
-  Windows is untested.
+[NOTES.md](NOTES.md) has the investigation details behind these, and notes on the Python
+driver.
