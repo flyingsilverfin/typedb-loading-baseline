@@ -119,14 +119,20 @@ def stop_server(process):
         process.kill()
 
 
-def generate(table, path, *generate_args):
+def generate(table, name, **options):
+    """Generate run/data/<name>-<options>.csv with generate.py, unless it exists; return its path.
+
+    The options are part of the file name, so changing them never reuses a stale file."""
+    path = RUN_DIR / "data" / (name + "".join(f"-{key}={value}" for key, value in options.items()) + ".csv")
     if path.exists():
-        return
+        return path
     print(f"Generating {path.relative_to(ROOT)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".part")
+    generate_args = [f"--{key.replace('_', '-')}={value}" for key, value in options.items()]
     subprocess.run([sys.executable, str(ROOT / "generate.py"), table, *generate_args, "-o", str(partial)], check=True)
     partial.rename(path)
+    return path
 
 
 def ensure_python_loader():
@@ -191,11 +197,12 @@ def validate(http, args, data_files):
             return False
 
     # Spot-check that specific CSV rows landed with the right values and role players.
+    # Each CSV column is an attribute of the same name (see "Changing the data" in the README).
     checks = []
     for entity in ("first-entity", "second-entity"):
         with open(data_files[entity]) as f:
             for row in _head(f, 3):
-                checks.append(f"match $x isa {entity}, has id {row['id']}, has A {row['A']}, has B {row['B']};")
+                checks.append(f"match $x isa {entity}, " + ", ".join(f"has {column} {value}" for column, value in row.items()) + ";")
     with open(data_files["between"]) as f:
         for row in _head(f, 3):
             checks.append(f"match $f isa first-entity, has id {row['from']}; $t isa second-entity, has id {row['to']}; "
@@ -244,18 +251,14 @@ def main():
     server_bin, loader_bin = ensure_typedb(args.version, args.typedb_home)
     loader_command = ensure_python_loader() if args.loader == "python" else [str(loader_bin)]
 
+    # Entity tables use different seeds so that their A/B values differ. The relation table
+    # samples both endpoints from the entities' dense ids, so every row matches two entities.
     n = args.entities
-    data_dir = RUN_DIR / "data"
     data_files = {
-        "first-entity": data_dir / f"first-entity-n{n}.csv",
-        "second-entity": data_dir / f"second-entity-n{n}.csv",
-        "between": data_dir / f"between-n{args.relations}-ids{n}.csv",
+        "first-entity": generate("entities", "first-entity", rows=n, columns=2, value_type="integer", seed=0),
+        "second-entity": generate("entities", "second-entity", rows=n, columns=2, value_type="integer", seed=100),
+        "between": generate("relations", "between", rows=args.relations, from_range=f"0:{n}", to_range=f"0:{n}", seed=200),
     }
-    # Entity tables use different seeds so that their A/B values differ.
-    generate("entities", data_files["first-entity"], "--rows", str(n), "--seed", "0")
-    generate("entities", data_files["second-entity"], "--rows", str(n), "--seed", "100")
-    generate("relations", data_files["between"], "--rows", str(args.relations),
-             "--from-range", f"0:{n}", "--to-range", f"0:{n}", "--seed", "200")
 
     results_dir = RUN_DIR / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")
     print(f"Starting TypeDB server ({server_bin}) in development mode")
