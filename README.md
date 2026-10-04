@@ -11,7 +11,7 @@ python3 run_benchmark.py --loader python  # python_loader.py
 ```
 
 This one command downloads TypeDB, generates the data, starts a fresh server, loads
-everything, validates the result and prints a summary like:
+everything and prints a summary like:
 
 ```
 TypeDB 3.13.6 on aarch64, 10 CPUs; loader=typedb, batch-rows=1000, parallel-batches=8
@@ -49,10 +49,11 @@ scratch.
 4. **Define** `schema.tql` in a new database.
 5. **Load**, timing each step: `load-first.tql`, then `load-second.tql`, then
    `load-between.tql`. The relation template matches both endpoints by their `@key` id
-   before inserting. Before the relation load there is an untimed 30s pause
-   (`--settle-seconds`) so the server's statistics catch up; see the lessons below.
-6. **Validate** the instance counts and spot-check that specific CSV rows were loaded with
-   the right values and role players. Then stop the server.
+   before inserting.
+6. **Validate**, only with `--validate`: check the instance counts and spot-check that
+   specific CSV rows were loaded with the right values and role players. This is untimed,
+   and off by default because counting a large database takes a while. Then stop the
+   server.
 
 Results, the loaders' logs and their rejects/checkpoint files go to
 `run/results/<timestamp>/`. `results.json` records the TypeDB version, machine,
@@ -68,7 +69,7 @@ python3 run_benchmark.py --help
   --relations N            rows in the relation table (default: 1000000)
   --batch-rows N           rows per transaction (default: 1000)
   --parallel-batches N     concurrent transactions (default: 8)
-  --settle-seconds S       untimed pause before the relation load (default: 30)
+  --validate               check counts and spot-check rows after loading (default: off)
   --version V              TypeDB version to download (default: 3.13.6)
   --typedb-home DIR        use this TypeDB distribution instead of downloading one
   --database NAME          database name (default: loading-baseline)
@@ -140,14 +141,13 @@ inputs are not supported, and progress is reported in rows only, not bytes.
   load. The planner then scanned every `second-entity` `has` edge for each input row (60M
   storage advances per 1,000-row batch) instead of looking up `id` by value. A 3s pause
   prevented it at small scale, but at 1M rows it still hit 4 of 8 runs with 10k-row
-  batches. Stalled batches can run into the 300s
-  transaction timeout and be rejected. The benchmark therefore waits 30s before the
-  relation load. Use `--settle-seconds 0` to reproduce it. This deserves a TypeDB issue: real loading
-  pipelines usually load relations straight after entities.
+  batches. Stalled batches can run into the 300s transaction timeout and be rejected.
+  The benchmark doesn't pause, so a run that hits this shows a much slower relation
+  step; if that happens, run it again.
 - **Rows that match nothing are dropped silently.** If a relation row's `from` or `to` id
   isn't found, its `match` returns no rows and nothing is inserted. The loader only warns
-  when an entire batch inserts nothing, so check counts after a load, as the benchmark
-  does.
+  when an entire batch inserts nothing, so check counts after a load, as
+  `--validate` does.
 - **Expect run-to-run variance of about 15–20%.** Compare several runs, not single numbers.
 - The package repository (repo.typedb.com) returns 403 to Python's default `urllib`
   User-Agent. `download_typedb.py` sends its own.

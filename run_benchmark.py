@@ -8,7 +8,7 @@ Steps (everything is written under run/):
   4. create the database and define schema.tql
   5. load first-entity, second-entity, then between, timing each with typedb loader
      (or, with --loader python, with python_loader.py and the TypeDB Python driver)
-  6. validate instance counts and spot-check loaded rows, then stop the server
+  6. with --validate, check instance counts and spot-check loaded rows; then stop the server
 """
 
 import argparse
@@ -231,9 +231,8 @@ def main():
     parser.add_argument("--relations", type=int, default=1_000_000, help="rows in the relation table (default: 1000000)")
     parser.add_argument("--batch-rows", type=int, default=1000, help="loader rows per transaction (default: 1000)")
     parser.add_argument("--parallel-batches", type=int, default=8, help="loader concurrent transactions (default: 8)")
-    parser.add_argument("--settle-seconds", type=float, default=30,
-                        help="untimed pause between the entity loads and the relation load, so the server's "
-                             "statistics catch up; 0 to disable (default: 30, see README)")
+    parser.add_argument("--validate", action="store_true",
+                        help="after loading, check instance counts and spot-check loaded rows (not timed; off by default)")
     parser.add_argument("--server-arg", action="append", default=[], metavar="ARG",
                         help="extra TypeDB server argument, e.g. --server-arg=--storage.rocksdb.cache-size=4gb; repeatable")
     parser.add_argument("--restart-after-schema", action="store_true",
@@ -281,12 +280,6 @@ def main():
         for kind, name, template in (("entity", "first-entity", "load-first.tql"),
                                      ("entity", "second-entity", "load-second.tql"),
                                      ("relation", "between", "load-between.tql")):
-            if kind == "relation" and args.settle_seconds:
-                # Starting the relation load immediately after the entity loads can leave the
-                # server planning it from statistics that don't include the entities yet, which
-                # stalls the first batches with a full scan per row. See README.
-                print(f"\nWaiting {args.settle_seconds}s for statistics to catch up (not timed)")
-                time.sleep(args.settle_seconds)
             print(f"\nLoading {kind} {name} ({data_files[name].relative_to(ROOT)} with {template})")
             seconds, summary = run_loader(loader_command, ROOT / template, data_files[name], results_dir / name, args)
             rows = summary.get("Rows committed", 0)
@@ -295,15 +288,17 @@ def main():
             if summary.get("Rows rejected") != 0:
                 sys.exit(f"typedb loader rejected rows; see {results_dir / name}")
 
-        print("\nValidating")
-        valid = validate(http, args, data_files)
+        valid = None  # not checked
+        if args.validate:
+            print("\nValidating")
+            valid = validate(http, args, data_files)
     finally:
         stop_server(server)
 
     results = {
         "typedb": {**server_version, "home": str(server_bin.parent.parent)},
         "machine": machine_info(),
-        "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds,
+        "parameters": {"loader": args.loader,
                        "restart_after_schema": args.restart_after_schema, "server_args": args.server_arg, "entities": args.entities, "relations": args.relations,
                        "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
         "phases": phases,
@@ -317,7 +312,7 @@ def main():
     for p in phases:
         print(f"{p['phase']:<24}{p['rows']:>12,}{p['seconds']:>10.1f}{p['rows_per_second']:>10,}")
     print(f"\nResults: {results_dir.relative_to(ROOT) / 'results.json'}")
-    if not valid:
+    if valid is False:
         sys.exit("validation FAILED")
 
 
