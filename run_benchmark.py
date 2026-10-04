@@ -97,6 +97,7 @@ def start_server(server_bin, server_dir, args, fresh=True):
             "--diagnostics.monitoring.enabled=false",
             f"--storage.data-directory={server_dir / 'data'}",
             f"--logging.directory={server_dir / 'logs'}",
+            *args.server_arg,
         ],
         cwd=server_bin.parent, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
@@ -233,6 +234,8 @@ def main():
     parser.add_argument("--settle-seconds", type=float, default=30,
                         help="untimed pause between the entity loads and the relation load, so the server's "
                              "statistics catch up; 0 to disable (default: 30, see README)")
+    parser.add_argument("--server-arg", action="append", default=[], metavar="ARG",
+                        help="extra TypeDB server argument, e.g. --server-arg=--storage.rocksdb.cache-size=4gb; repeatable")
     parser.add_argument("--restart-after-schema", action="store_true",
                         help="restart the server after defining the schema (workaround for TypeDB PR #7981)")
     parser.add_argument("--version", default=DEFAULT_VERSION, help=f"TypeDB version to download (default: {DEFAULT_VERSION})")
@@ -301,7 +304,7 @@ def main():
         "typedb": {**server_version, "home": str(server_bin.parent.parent)},
         "machine": machine_info(),
         "parameters": {"loader": args.loader, "settle_seconds": args.settle_seconds,
-                       "restart_after_schema": args.restart_after_schema, "entities": args.entities, "relations": args.relations,
+                       "restart_after_schema": args.restart_after_schema, "server_args": args.server_arg, "entities": args.entities, "relations": args.relations,
                        "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
         "phases": phases,
         "valid": valid,
