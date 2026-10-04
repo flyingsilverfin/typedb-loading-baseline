@@ -9,6 +9,8 @@ Steps (everything is written under run/):
   5. load first-entity, second-entity, then between, timing each with typedb loader
      (or, with --loader python, with python_loader.py and the TypeDB Python driver)
   6. with --validate, check instance counts and spot-check loaded rows; then stop the server
+
+Results go to run/results/<timestamp>/results.json, also when a step fails.
 """
 
 import argparse
@@ -28,11 +30,15 @@ from pathlib import Path
 
 from download_typedb import DEFAULT_VERSION, ROOT, RUN_DIR, ensure_typedb
 
-USERNAME, PASSWORD = "admin", "password"
+USERNAME, PASSWORD = "admin", "password"  # a fresh TypeDB server's default credentials
 LOADER_ECHO_INTERVAL_SECONDS = 5
 
 
 class TypeDBHttp:
+    """Minimal client for the server's HTTP API: enough to create the database, define the
+    schema and count instances using only the standard library, so the benchmark needs no
+    driver. The loaders talk to the server over gRPC on --port."""
+
     def __init__(self, port):
         self.base = f"http://127.0.0.1:{port}"
         self.token = None
@@ -90,10 +96,10 @@ def start_server(server_bin, server_dir, args):
     process = subprocess.Popen(
         [
             str(server_bin),
-            "--development-mode.enabled=true",
+            "--development-mode.enabled=true",  # no telemetry or error reporting to TypeDB
             f"--server.listen-address=127.0.0.1:{args.port}",
             f"--server.http.listen-address=127.0.0.1:{args.http_port}",
-            "--diagnostics.monitoring.enabled=false",
+            "--diagnostics.monitoring.enabled=false",  # no Prometheus metrics endpoint
             f"--storage.data-directory={server_dir / 'data'}",
             f"--logging.directory={server_dir / 'logs'}",
             *args.server_arg,
@@ -177,7 +183,11 @@ def run_loader(loader_command, query, data, output_dir, args):
         exit_code = process.wait()
     seconds = time.monotonic() - start
     if exit_code != 0:
-        sys.exit(f"typedb loader exited with {exit_code}; see {output_dir / 'loader.log'}")
+        sys.exit(f"{args.loader} loader exited with {exit_code}; see {output_dir / 'loader.log'}")
+    if "Rows rejected" not in summary:
+        sys.exit(f"{args.loader} loader printed no summary; see {output_dir / 'loader.log'}")
+    if summary["Rows rejected"]:
+        sys.exit(f"{args.loader} loader rejected {summary['Rows rejected']} rows; see {output_dir}")
     return seconds, summary
 
 
@@ -239,13 +249,14 @@ def main():
     parser.add_argument("--parallel-batches", type=int, default=8, help="loader concurrent transactions (default: 8)")
     parser.add_argument("--validate", action="store_true",
                         help="after loading, check instance counts and spot-check loaded rows (not timed; off by default)")
-    parser.add_argument("--server-arg", action="append", default=[], metavar="ARG",
-                        help="extra TypeDB server argument, e.g. --server-arg=--storage.rocksdb.cache-size=4gb; repeatable")
     parser.add_argument("--version", default=DEFAULT_VERSION, help=f"TypeDB version to download (default: {DEFAULT_VERSION})")
-    parser.add_argument("--typedb-home", type=Path, help="use this TypeDB distribution instead of downloading one")
     parser.add_argument("--database", default="loading-baseline", help="database name (default: loading-baseline)")
     parser.add_argument("--port", type=int, default=1729, help="server gRPC port (default: 1729)")
     parser.add_argument("--http-port", type=int, default=8000, help="server HTTP port (default: 8000)")
+    advanced = parser.add_argument_group("advanced")
+    advanced.add_argument("--typedb-home", type=Path, help="use this TypeDB distribution instead of downloading one")
+    advanced.add_argument("--server-arg", action="append", default=[], metavar="ARG",
+                          help="extra TypeDB server argument, e.g. --server-arg=--storage.rocksdb.cache-size=4gb; repeatable")
     args = parser.parse_args()
 
     server_bin, loader_bin = ensure_typedb(args.version, args.typedb_home)
@@ -269,42 +280,43 @@ def main():
         http.request("POST", f"/v1/databases/{args.database}")
         http.query(args.database, "schema", (ROOT / "schema.tql").read_text())
 
-        phases = []
-        for kind, name, template in (("entity", "first-entity", "load-first.tql"),
-                                     ("entity", "second-entity", "load-second.tql"),
-                                     ("relation", "between", "load-between.tql")):
-            print(f"\nLoading {kind} {name} ({data_files[name].relative_to(ROOT)} with {template})")
-            seconds, summary = run_loader(loader_command, ROOT / template, data_files[name], results_dir / name, args)
-            rows = summary.get("Rows committed", 0)
-            phases.append({"phase": f"{kind} {name}", "rows": rows, "rejected": summary.get("Rows rejected"),
-                           "seconds": round(seconds, 3), "rows_per_second": round(rows / seconds)})
-            if summary.get("Rows rejected") != 0:
-                sys.exit(f"typedb loader rejected rows; see {results_dir / name}")
-
-        valid = None  # not checked
-        if args.validate:
-            print("\nValidating")
-            valid = validate(http, args, data_files)
+        results = {
+            "typedb": {**server_version, "home": str(server_bin.parent.parent)},
+            "machine": machine_info(),
+            "parameters": {"loader": args.loader, "server_args": args.server_arg, "entities": args.entities,
+                           "relations": args.relations, "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
+            "phases": [],
+            "valid": None,  # not checked
+            "error": None,
+        }
+        try:
+            for kind, name, template in (("entity", "first-entity", "load-first.tql"),
+                                         ("entity", "second-entity", "load-second.tql"),
+                                         ("relation", "between", "load-between.tql")):
+                print(f"\nLoading {kind} {name} ({data_files[name].relative_to(ROOT)} with {template})")
+                seconds, summary = run_loader(loader_command, ROOT / template, data_files[name], results_dir / name, args)
+                rows = summary["Rows committed"]
+                results["phases"].append({"phase": f"{kind} {name}", "rows": rows, "rejected": summary["Rows rejected"],
+                                          "seconds": round(seconds, 3), "rows_per_second": round(rows / seconds)})
+            if args.validate:
+                print("\nValidating")
+                results["valid"] = validate(http, args, data_files)
+        except SystemExit as e:  # a failed step: still write results.json, with the completed phases
+            results["error"] = str(e)
     finally:
         stop_server(server)
 
-    results = {
-        "typedb": {**server_version, "home": str(server_bin.parent.parent)},
-        "machine": machine_info(),
-        "parameters": {"loader": args.loader, "server_args": args.server_arg, "entities": args.entities,
-                       "relations": args.relations, "batch_rows": args.batch_rows, "parallel_batches": args.parallel_batches},
-        "phases": phases,
-        "valid": valid,
-    }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 
     print(f"\nTypeDB {server_version.get('version', '?')} on {results['machine']['machine']}, "
           f"{results['machine']['cpus']} CPUs; loader={args.loader}, batch-rows={args.batch_rows}, parallel-batches={args.parallel_batches}")
     print(f"{'phase':<24}{'rows':>12}{'seconds':>10}{'rows/s':>10}")
-    for p in phases:
+    for p in results["phases"]:
         print(f"{p['phase']:<24}{p['rows']:>12,}{p['seconds']:>10.1f}{p['rows_per_second']:>10,}")
     print(f"\nResults: {results_dir.relative_to(ROOT) / 'results.json'}")
-    if valid is False:
+    if results["error"]:
+        sys.exit(results["error"])
+    if results["valid"] is False:
         sys.exit("validation FAILED")
 
 
