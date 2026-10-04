@@ -15,6 +15,9 @@ that fails to commit, are written to rejects.csv / rejects.log in --output-dir.
 
 Unlike `typedb loader`, there is no checkpointing or resume, and datetime-tz inputs are
 not supported.
+
+The core is parse_given -> Producer.run / Batch.seal -> consume; the rest is argument
+parity with `typedb loader` (TLS, addresses, null tokens, limits, schema definition).
 """
 
 import argparse

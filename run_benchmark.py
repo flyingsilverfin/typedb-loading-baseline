@@ -99,7 +99,7 @@ def start_server(server_bin, server_dir, args):
             "--development-mode.enabled=true",  # no telemetry or error reporting to TypeDB
             f"--server.listen-address=127.0.0.1:{args.port}",
             f"--server.http.listen-address=127.0.0.1:{args.http_port}",
-            "--diagnostics.monitoring.enabled=false",  # no Prometheus metrics endpoint
+            "--diagnostics.monitoring.enabled=false",  # no monitoring endpoint (port 4104 by default)
             f"--storage.data-directory={server_dir / 'data'}",
             f"--logging.directory={server_dir / 'logs'}",
             *args.server_arg,
