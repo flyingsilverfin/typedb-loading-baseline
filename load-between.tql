@@ -1,3 +1,5 @@
+# Run once per CSV row: look up both ends by their @key id, then insert the relation.
+# A row whose ids match nothing inserts nothing, without an error.
 given $from: integer, $to: integer;
 match
   $f isa first-entity, has id == $from;

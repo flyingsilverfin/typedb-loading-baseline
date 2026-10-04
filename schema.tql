@@ -1,4 +1,7 @@
 # `first` and `from` are reserved TypeQL keywords, hence first-entity and source/target.
+# The attribute labels A and B mirror generate.py's CSV column names (TypeQL labels are
+# usually lower-case). `@key` makes id unique and required, so the relation template can
+# look an entity up by its id.
 define
   attribute id, value integer;
   attribute A, value integer;

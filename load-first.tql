@@ -1,3 +1,5 @@
+# Run once per CSV row. The `given` variables are matched to CSV header columns by name,
+# and `has id == $id` gives the new entity an id attribute with the row's value.
 given $id: integer, $A: integer, $B: integer;
 insert
   $e isa first-entity, has id == $id, has A == $A, has B == $B;
