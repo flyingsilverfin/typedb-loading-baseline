@@ -59,6 +59,45 @@ Results, the loaders' logs and their rejects/checkpoint files go to
 `run/results/<timestamp>/`. `results.json` records the TypeDB version, machine,
 parameters and per-step timings. It is the file to share when reporting numbers.
 
+## Architecture
+
+The benchmark follows the practices that gave the fastest loads in our measurements.
+Rates below are from a 10-CPU arm64 machine running TypeDB 3.13.6, unless stated otherwise.
+
+- **Send rows in batches through a `given` query.** Each template starts with a `given`
+  stage declaring its input variables (`given $id: integer, ...;`). The loader sends
+  1,000 CSV rows at a time as the input rows of one query, in one request, and commits
+  them as one write transaction. That replaces a network round trip and a commit per row
+  with one per batch.
+- **Run several transactions in parallel.** Batches are committed concurrently
+  (`--parallel-batches`, default 8). On the reference machine this was the biggest lever:
+  going from 1 to 4 to 8 parallel batches raised entity loading from about 11k to 37k to
+  52k rows/s, and relation loading from 6k to 20k to 32k rows/s. With 10 CPUs, relation
+  loading peaked at about 12 parallel batches and got slower beyond that, as the client
+  and server competed for cores; entity loading still improved slightly up to 16.
+- **Keep batches moderate.** Larger batches mean fewer commits, but each slow or failed
+  batch costs more. With 10,000-row batches, 4 of 8 runs had relation loads stall for
+  minutes when batches were planned badly (see Lessons), some hitting the 300s
+  transaction timeout, and the runs that didn't stall were no faster. 1,000 rows was a
+  good balance.
+- **Load entities first, then relations.** A relation needs its role players to exist,
+  so the relation template matches both endpoints before inserting. Loading all entities
+  first means every relation batch can find its endpoints.
+- **Match relation endpoints by a key attribute.** Each entity type owns `id @key`, and
+  the relation template finds its endpoints with `has id == $from`. Matching by
+  attribute value lets the server find each endpoint through an index lookup instead of
+  scanning entities, and `@key` guarantees exactly one entity per id.
+- **Pass typed values.** The server type-checks given rows, so the loaders parse each CSV
+  cell into its declared type (`integer`, `string`, ...) before sending. Strings sent for
+  `integer` variables are rejected.
+- **Keep the client off the critical path.** `typedb loader` is a native binary. In
+  `python_loader.py`, a single producer thread parses the CSV and builds each batch, and
+  the consumer threads only send queries and commit. Building batches on the consumer
+  threads made them contend for Python's GIL, and was 3.5× slower at 8 threads.
+- **Keep extra work out of the timed path.** The server starts fresh, and the schema is
+  defined before timing starts. Validation is optional (`--validate`) and runs after all
+  loads, untimed. Only the loader runs themselves are timed.
+
 ## Options
 
 ```
